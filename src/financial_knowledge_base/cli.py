@@ -5,7 +5,12 @@ from typing import Annotated
 import typer
 
 from .ai.openai_client import OpenAIClient
+from .evaluation.evaluator import Item2Evaluator
+from .evaluation.models import GoldItem2Case, Item2Review
+from .evaluation.review import Item2ReviewService
+from .evaluation.store import EvaluationArtifactStore
 from .extraction.item2_extractor import Item2Extractor
+from .extraction.models import Item2ExtractionProposal
 from .extraction.proposal_store import ExtractionProposalStore
 from .ingestion.models import IngestedFiling, ParsedDocument
 from .ingestion.parsed_store import ParsedDocumentStore
@@ -139,6 +144,170 @@ def extract_item_2(
     typer.echo(f"Verified evidence: {result.verified_claim_count}")
 
 
+@app.command("create-item-2-review")
+def create_item_2_review(
+    proposal_path: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Path to an Item 2 extraction proposal.",
+        ),
+    ],
+    reviewer: Annotated[
+        str,
+        typer.Option(
+            envvar="EVAL_REVIEWER",
+            help="Name or identifier for the human reviewer.",
+        ),
+    ],
+) -> None:
+    """Create an editable human-review template for a proposal."""
+
+    proposal = Item2ExtractionProposal.model_validate_json(
+        proposal_path.read_text(encoding="utf-8")
+    )
+    review = Item2ReviewService().create_template(
+        proposal=proposal,
+        reviewer=reviewer,
+    )
+    result = EvaluationArtifactStore().save_review(
+        proposal_path=proposal_path,
+        review=review,
+    )
+
+    typer.echo(f"Status: {result.status}")
+    typer.echo(f"Review: {result.path}")
+    typer.echo(f"Claims to review: {len(review.claim_reviews)}")
+    typer.echo(
+        "Set each claim decision, add any missed_claims, then finalize the review."
+    )
+
+
+@app.command("finalize-item-2-review")
+def finalize_item_2_review(
+    proposal_path: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Path to the reviewed proposal.",
+        ),
+    ],
+    review_path: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Path to the completed review JSON.",
+        ),
+    ],
+    document_path: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Path to the source document.json.",
+        ),
+    ],
+    case_name: Annotated[
+        str,
+        typer.Option(help="Stable lowercase name for the evaluation case."),
+    ],
+    evaluation_directory: Annotated[
+        Path,
+        typer.Option(help="Directory for checked-in gold evaluation cases."),
+    ] = Path("evals/item-2"),
+) -> None:
+    """Validate a completed review and create a reusable gold case."""
+
+    proposal = Item2ExtractionProposal.model_validate_json(
+        proposal_path.read_text(encoding="utf-8")
+    )
+    review = Item2Review.model_validate_json(review_path.read_text(encoding="utf-8"))
+    document = ParsedDocument.model_validate_json(
+        document_path.read_text(encoding="utf-8")
+    )
+    gold_case = Item2ReviewService().finalize(
+        case_name=case_name,
+        proposal=proposal,
+        review=review,
+        document=document,
+    )
+    result = EvaluationArtifactStore().save_gold_case(
+        evaluation_directory=evaluation_directory,
+        case_name=case_name,
+        gold_case=gold_case,
+    )
+
+    typer.echo(f"Status: {result.status}")
+    typer.echo(f"Gold case: {result.path}")
+    typer.echo(f"Expected claims: {len(gold_case.expected_claims)}")
+    typer.echo(f"Accepted: {gold_case.review_summary.accepted}")
+    typer.echo(f"Rejected: {gold_case.review_summary.rejected}")
+    typer.echo(f"Edited: {gold_case.review_summary.needs_edit}")
+    typer.echo(f"Missed: {gold_case.review_summary.missed}")
+
+
+@app.command("evaluate-item-2")
+def evaluate_item_2(
+    proposal_path: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Path to an Item 2 extraction proposal.",
+        ),
+    ],
+    gold_case_path: Annotated[
+        Path,
+        typer.Option(
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+            help="Path to a finalized Item 2 gold case.",
+        ),
+    ],
+) -> None:
+    """Evaluate an Item 2 proposal against human-labelled claims."""
+
+    proposal = Item2ExtractionProposal.model_validate_json(
+        proposal_path.read_text(encoding="utf-8")
+    )
+    gold_case = GoldItem2Case.model_validate_json(
+        gold_case_path.read_text(encoding="utf-8")
+    )
+    report = Item2Evaluator().evaluate(proposal=proposal, gold_case=gold_case)
+    result = EvaluationArtifactStore().save_report(
+        proposal_path=proposal_path,
+        case_name=gold_case.case_name,
+        report=report,
+    )
+
+    typer.echo(f"Status: {result.status}")
+    typer.echo(f"Report: {result.path}")
+    typer.echo(f"Precision: {_format_metric(report.claim_precision)}")
+    typer.echo(f"Recall: {_format_metric(report.claim_recall)}")
+    typer.echo(f"F1: {_format_metric(report.claim_f1)}")
+    typer.echo(f"Claim type accuracy: {_format_metric(report.claim_type_accuracy)}")
+    typer.echo(
+        f"Evidence verification: {_format_metric(report.evidence_verification_rate)}"
+    )
+    typer.echo(f"Ungrounded claims: {_format_metric(report.ungrounded_claim_rate)}")
+    typer.echo(f"Unmatched claims: {_format_metric(report.unmatched_claim_rate)}")
+
+
 async def _ingest_latest(
     cik: str,
     form_type: str,
@@ -156,6 +325,10 @@ async def _ingest_latest(
         parsed_store=parsed_store,
     )
     return await ingestor.ingest_latest(form_type)
+
+
+def _format_metric(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.1%}"
 
 
 def main() -> None:
