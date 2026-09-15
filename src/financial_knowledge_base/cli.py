@@ -9,6 +9,7 @@ from .evaluation.evaluator import Item2Evaluator
 from .evaluation.models import GoldItem2Case, Item2Review
 from .evaluation.review import Item2ReviewService
 from .evaluation.store import EvaluationArtifactStore
+from .extraction.checkpoint_store import Item2ChunkCheckpointStore
 from .extraction.item2_extractor import Item2Extractor
 from .extraction.models import Item2ExtractionProposal
 from .extraction.proposal_store import ExtractionProposalStore
@@ -124,14 +125,36 @@ def extract_item_2(
             help="OpenAI model that supports structured outputs.",
         ),
     ],
+    max_output_tokens: Annotated[
+        int,
+        typer.Option(
+            envvar="OPENAI_MAX_OUTPUT_TOKENS",
+            min=1_024,
+            help="Maximum model output tokens for each Item 2 chunk.",
+        ),
+    ] = 16_000,
 ) -> None:
     """Propose grounded financial claims from Part I, Item 2."""
 
     document = ParsedDocument.model_validate_json(
         document_path.read_text(encoding="utf-8")
     )
-    llm_client = OpenAIClient(api_key=api_key, model=model)
-    extractor = Item2Extractor(llm_client)
+    llm_client = OpenAIClient(
+        api_key=api_key,
+        model=model,
+        max_output_tokens=max_output_tokens,
+    )
+    checkpoint_directory = (
+        document_path.parent
+        / "extractions"
+        / "item-2"
+        / Item2Extractor.PROMPT_VERSION
+        / "checkpoints"
+    )
+    extractor = Item2Extractor(
+        llm_client,
+        checkpoint_store=Item2ChunkCheckpointStore(checkpoint_directory),
+    )
     proposal = asyncio.run(extractor.extract(document))
     result = ExtractionProposalStore().save(
         document_path=document_path,
@@ -301,6 +324,9 @@ def evaluate_item_2(
     typer.echo(f"Recall: {_format_metric(report.claim_recall)}")
     typer.echo(f"F1: {_format_metric(report.claim_f1)}")
     typer.echo(f"Claim type accuracy: {_format_metric(report.claim_type_accuracy)}")
+    typer.echo(f"Exact evidence matches: {report.exact_evidence_match_count}")
+    typer.echo(f"Evidence-overlap matches: {report.evidence_overlap_match_count}")
+    typer.echo(f"Field-similarity matches: {report.field_similarity_match_count}")
     typer.echo(
         f"Evidence verification: {_format_metric(report.evidence_verification_rate)}"
     )

@@ -48,6 +48,7 @@ class EvaluationArtifactStore:
             proposal_path.parent
             / "evaluations"
             / case_name
+            / report.schema_version
             / f"{proposal_path.stem}.json"
         )
         return self._save_immutable(path, report)

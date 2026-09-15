@@ -1,14 +1,17 @@
 [project]
 name = "financial-knowledge-base"
 version = "0.1.0"
-description = "Add your description here"
+description = "Build a versioned financial knowledge base from SEC filings"
 readme = "README.md"
 authors = [
     { name = "chudah1", email = "yakung25c@gmail.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "beautifulsoup4>=4.15.0",
     "httpx>=0.28.1",
+    "lxml>=6.1.3",
+    "openai>=3.8.0",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
     "typer>=0.27.2",

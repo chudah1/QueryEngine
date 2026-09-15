@@ -7,6 +7,11 @@ from pydantic import BaseModel, Field, model_validator
 from financial_knowledge_base.extraction.models import GroundedClaim, ProposedClaim
 
 ReviewDecision = Literal["pending", "accepted", "rejected", "needs_edit"]
+ClaimMatchMethod = Literal[
+    "exact_evidence",
+    "evidence_overlap",
+    "field_similarity",
+]
 RejectionReason = Literal[
     "unsupported",
     "not_material",
@@ -49,6 +54,7 @@ class Item2Review(BaseModel):
     proposal_response_id: str | None
     proposal_model: str
     prompt_version: str
+    prompt_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     parser_version: str
     source_content_sha256: str
     text_content_sha256: str
@@ -80,23 +86,47 @@ class GoldItem2Case(BaseModel):
     section_text: str
     created_from_response_id: str | None
     created_from_model: str
+    created_from_prompt_version: str | None = None
+    created_from_prompt_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+    )
     review_summary: ReviewSummary
     expected_claims: list[ProposedClaim]
+
+
+class Item2ClaimMatch(BaseModel):
+    """Auditable link between one predicted claim and one expected claim."""
+
+    predicted_claim_index: int = Field(ge=0)
+    expected_claim_index: int = Field(ge=0)
+    method: ClaimMatchMethod
+    score: float = Field(ge=0.0, le=1.0)
+    evidence_overlap: float = Field(ge=0.0, le=1.0)
+    statement_similarity: float = Field(ge=0.0, le=1.0)
+    field_similarity: float = Field(ge=0.0, le=1.0)
 
 
 class Item2EvaluationReport(BaseModel):
     """Deterministic comparison of one proposal with a gold case."""
 
-    schema_version: Literal["item2-evaluation-v1"] = "item2-evaluation-v1"
+    schema_version: Literal[
+        "item2-evaluation-v1",
+        "item2-evaluation-v2",
+    ] = "item2-evaluation-v2"
     case_name: str
     proposal_response_id: str | None
     model: str
     prompt_version: str
+    prompt_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     predicted_claim_count: int
     expected_claim_count: int
     matched_claim_count: int
     false_positive_count: int
     false_negative_count: int
+    exact_evidence_match_count: int = 0
+    evidence_overlap_match_count: int = 0
+    field_similarity_match_count: int = 0
     correct_claim_type_count: int
     exact_claim_match_count: int
     claim_precision: float | None
@@ -107,6 +137,7 @@ class Item2EvaluationReport(BaseModel):
     evidence_verification_rate: float | None
     ungrounded_claim_rate: float | None
     unmatched_claim_rate: float | None
+    matches: list[Item2ClaimMatch] = Field(default_factory=list)
 
 
 class StoredEvaluationArtifact(BaseModel):

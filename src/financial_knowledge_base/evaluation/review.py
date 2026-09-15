@@ -44,6 +44,7 @@ class Item2ReviewService:
             proposal_response_id=proposal.response_id,
             proposal_model=proposal.model,
             prompt_version=proposal.prompt_version,
+            prompt_sha256=proposal.prompt_sha256,
             parser_version=proposal.parser_version,
             source_content_sha256=proposal.source_content_sha256,
             text_content_sha256=proposal.text_content_sha256,
@@ -102,6 +103,8 @@ class Item2ReviewService:
             section_text=section.text,
             created_from_response_id=proposal.response_id,
             created_from_model=proposal.model,
+            created_from_prompt_version=proposal.prompt_version,
+            created_from_prompt_sha256=proposal.prompt_sha256,
             review_summary=ReviewSummary(
                 accepted=sum(
                     item.decision == "accepted" for item in review.claim_reviews
@@ -130,6 +133,7 @@ class Item2ReviewService:
             ),
             "proposal model": (review.proposal_model, proposal.model),
             "prompt version": (review.prompt_version, proposal.prompt_version),
+            "prompt hash": (review.prompt_sha256, proposal.prompt_sha256),
             "parser version": (review.parser_version, proposal.parser_version),
             "source hash": (
                 review.source_content_sha256,
@@ -187,23 +191,36 @@ class Item2ReviewService:
         section_text: str,
         claims: list[ProposedClaim],
     ) -> None:
-        seen_quotes: set[str] = set()
+        seen_evidence: set[tuple[str | None, str]] = set()
         for index, claim in enumerate(claims):
-            if claim.evidence_quote in seen_quotes:
+            evidence_identity = (claim.scope_quote, claim.evidence_quote)
+            if evidence_identity in seen_evidence:
                 raise ReviewValidationError(
                     f"Gold claims contain duplicate evidence at index {index}"
                 )
-            seen_quotes.add(claim.evidence_quote)
+            seen_evidence.add(evidence_identity)
 
-            match_count = section_text.count(claim.evidence_quote)
-            if match_count != 1:
+            if claim.scope_quote is not None:
+                scope_count = section_text.count(claim.scope_quote)
+                if scope_count != 1:
+                    raise ReviewValidationError(
+                        f"Gold claim {index} scope occurs {scope_count} times; "
+                        "expected 1"
+                    )
+                scope_end = section_text.index(claim.scope_quote) + len(
+                    claim.scope_quote
+                )
+                match_count = section_text[scope_end:].count(claim.evidence_quote)
+            else:
+                match_count = section_text.count(claim.evidence_quote)
+            if match_count < 1:
                 raise ReviewValidationError(
-                    f"Gold claim {index} evidence occurs {match_count} times; expected 1"
+                    f"Gold claim {index} evidence does not occur in its scope"
                 )
 
     def _fingerprint(self, claim: GroundedClaim) -> str:
         canonical = json.dumps(
-            claim.model_dump(mode="json"),
+            claim.model_dump(mode="json", exclude_unset=True),
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -214,6 +231,7 @@ class Item2ReviewService:
             claim_type=claim.claim_type,
             statement=claim.statement,
             evidence_quote=claim.evidence_quote,
+            scope_quote=claim.scope_quote,
             metric=claim.metric,
             value=claim.value,
             period=claim.period,
