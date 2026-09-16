@@ -133,6 +133,13 @@ def extract_item_2(
             help="Maximum model output tokens for each Item 2 chunk.",
         ),
     ] = 16_000,
+    reasoning_effort: Annotated[
+        str,
+        typer.Option(
+            envvar="OPENAI_REASONING_EFFORT",
+            help="Reasoning effort used for each extraction request.",
+        ),
+    ] = "low",
 ) -> None:
     """Propose grounded financial claims from Part I, Item 2."""
 
@@ -143,6 +150,7 @@ def extract_item_2(
         api_key=api_key,
         model=model,
         max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
     )
     checkpoint_directory = (
         document_path.parent
@@ -165,6 +173,15 @@ def extract_item_2(
     typer.echo(f"Proposal: {result.proposal_path}")
     typer.echo(f"Claims: {result.claim_count}")
     typer.echo(f"Verified evidence: {result.verified_claim_count}")
+    filtered_response_count = sum(
+        response.response_status == "content_filtered"
+        for response in proposal.responses
+    )
+    if filtered_response_count:
+        typer.echo(
+            "Coverage warning: "
+            f"{filtered_response_count} response(s) contained filtered slices."
+        )
 
 
 @app.command("create-item-2-review")

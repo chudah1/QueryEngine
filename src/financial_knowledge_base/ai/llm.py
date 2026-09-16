@@ -8,6 +8,31 @@ class LLMResponseError(RuntimeError):
     """Raised when a provider does not return a usable structured response."""
 
 
+class LLMResponseTruncatedError(LLMResponseError):
+    """Raised when a provider stops before completing structured output."""
+
+
+class LLMResponseContentFilterError(LLMResponseError):
+    """Raised when a provider content filter stops structured output."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        model: str,
+        response_id: str | None,
+        raw_response: str,
+        input_tokens: int | None,
+        output_tokens: int | None,
+    ) -> None:
+        super().__init__(message)
+        self.model = model
+        self.response_id = response_id
+        self.raw_response = raw_response
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+
 @dataclass(frozen=True)
 class LLMResponse[OutputType: BaseModel]:
     """Provider-neutral structured response and execution metadata."""

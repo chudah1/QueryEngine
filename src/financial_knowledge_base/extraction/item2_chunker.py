@@ -92,6 +92,35 @@ class Item2Chunker:
             )
         return chunks
 
+    def split_chunk(self, chunk: Item2Chunk) -> list[Item2Chunk]:
+        """Split one failed chunk while preserving section-relative offsets."""
+
+        local_section = DocumentSection(
+            section_id="part-i-item-2",
+            part="PART I",
+            item_number="2",
+            heading="Item 2 extraction retry",
+            order=1,
+            character_start=0,
+            character_end=len(chunk.text),
+            text=chunk.text,
+        )
+        local_chunks = self.split(local_section)
+        if len(local_chunks) <= 1:
+            return []
+        return [
+            Item2Chunk(
+                chunk_id=f"{chunk.chunk_id}.{index:03d}",
+                character_start=chunk.character_start + local_chunk.character_start,
+                character_end=chunk.character_start + local_chunk.character_end,
+                heading_context=(
+                    local_chunk.heading_context or chunk.heading_context
+                ),
+                text=local_chunk.text,
+            )
+            for index, local_chunk in enumerate(local_chunks, start=1)
+        ]
+
     def _paragraphs(self, text: str) -> list[_Paragraph]:
         return [
             _Paragraph(

@@ -2,7 +2,11 @@ import json
 from collections.abc import Iterable
 from datetime import UTC, datetime
 
-from financial_knowledge_base.ai.llm import LLMClient
+from financial_knowledge_base.ai.llm import (
+    LLMClient,
+    LLMResponseContentFilterError,
+    LLMResponseTruncatedError,
+)
 from financial_knowledge_base.ingestion.models import DocumentSection, ParsedDocument
 
 from .checkpoint_store import Item2ChunkCheckpointStore
@@ -35,10 +39,14 @@ class Item2Extractor:
         *,
         chunker: Item2Chunker | None = None,
         checkpoint_store: Item2ChunkCheckpointStore | None = None,
+        truncation_chunker: Item2Chunker | None = None,
     ) -> None:
         self._llm_client = llm_client
         self._chunker = chunker or Item2Chunker()
         self._checkpoint_store = checkpoint_store
+        self._truncation_chunker = truncation_chunker or Item2Chunker(
+            maximum_characters=6_000
+        )
         self._prompt = load_item2_prompt(self.PROMPT_VERSION)
 
     async def extract(self, document: ParsedDocument) -> Item2ExtractionProposal:
@@ -124,6 +132,20 @@ class Item2Extractor:
                 user_prompt=self._user_prompt(section, chunk),
                 output_model=Item2ModelOutput,
             )
+        except LLMResponseContentFilterError as error:
+            return await self._extract_split_chunk(
+                document,
+                section,
+                chunk,
+                split_error=error,
+            )
+        except LLMResponseTruncatedError as error:
+            return await self._extract_split_chunk(
+                document,
+                section,
+                chunk,
+                split_error=error,
+            )
         except Exception as error:
             raise Item2ExtractionError(
                 f"Extraction failed for {chunk.chunk_id}: {error}"
@@ -149,6 +171,135 @@ class Item2Extractor:
             chunk_text_sha256=Item2ChunkCheckpointStore.chunk_text_sha256(chunk),
             response=response_metadata,
             output=response.output,
+        )
+
+    async def _extract_split_chunk(
+        self,
+        document: ParsedDocument,
+        section: DocumentSection,
+        chunk: Item2Chunk,
+        *,
+        split_error: LLMResponseTruncatedError | LLMResponseContentFilterError,
+    ) -> Item2ChunkCheckpoint:
+        child_chunks = self._truncation_chunker.split_chunk(chunk)
+        if not child_chunks and len(chunk.text) > 1_000:
+            adaptive_limit = max(1_000, len(chunk.text) // 2)
+            child_chunks = Item2Chunker(
+                maximum_characters=adaptive_limit
+            ).split_chunk(chunk)
+        if not child_chunks:
+            if isinstance(split_error, LLMResponseContentFilterError):
+                return self._content_filter_checkpoint(
+                    document,
+                    section,
+                    chunk,
+                    split_error,
+                )
+            raise Item2ExtractionError(
+                f"Extraction failed for {chunk.chunk_id}: {split_error}"
+            ) from split_error
+
+        child_checkpoints: list[Item2ChunkCheckpoint] = []
+        for child_chunk in child_chunks:
+            checkpoint = self._load_checkpoint(document, child_chunk)
+            if checkpoint is None:
+                checkpoint = await self._extract_chunk(
+                    document,
+                    section,
+                    child_chunk,
+                )
+                if self._checkpoint_store is not None:
+                    self._checkpoint_store.save(
+                        checkpoint=checkpoint,
+                        chunk=child_chunk,
+                    )
+            child_checkpoints.append(checkpoint)
+
+        models = {checkpoint.response.model for checkpoint in child_checkpoints}
+        if len(models) != 1:
+            raise Item2ExtractionError(
+                f"Expected one response model for {chunk.chunk_id}; found {models}"
+            )
+        claims = [
+            claim
+            for checkpoint in child_checkpoints
+            for claim in checkpoint.output.claims
+        ]
+        filtered_chunk_ids = [
+            checkpoint.response.chunk_id
+            for checkpoint in child_checkpoints
+            if checkpoint.response.response_status == "content_filtered"
+        ]
+        response_metadata = Item2ExtractionResponse(
+            chunk_id=chunk.chunk_id,
+            chunk_character_start=section.character_start + chunk.character_start,
+            chunk_character_end=section.character_start + chunk.character_end,
+            heading_context=list(chunk.heading_context),
+            model=next(iter(models)),
+            response_id=None,
+            input_tokens=self._sum_usage(
+                checkpoint.response.input_tokens
+                for checkpoint in child_checkpoints
+            ),
+            output_tokens=self._sum_usage(
+                checkpoint.response.output_tokens
+                for checkpoint in child_checkpoints
+            ),
+            raw_response=json.dumps(
+                [
+                    checkpoint.response.raw_response
+                    for checkpoint in child_checkpoints
+                ],
+                ensure_ascii=False,
+            ),
+            proposed_claim_count=len(claims),
+            response_status=(
+                "content_filtered" if filtered_chunk_ids else "completed"
+            ),
+            failure_reason=(
+                "content_filter in " + ", ".join(filtered_chunk_ids)
+                if filtered_chunk_ids
+                else None
+            ),
+        )
+        return Item2ChunkCheckpoint(
+            prompt_version=self._prompt.version,
+            prompt_sha256=self._prompt.sha256,
+            source_content_sha256=document.source_content_sha256,
+            text_content_sha256=document.text_content_sha256,
+            chunk_text_sha256=Item2ChunkCheckpointStore.chunk_text_sha256(chunk),
+            response=response_metadata,
+            output=Item2ModelOutput(claims=claims),
+        )
+
+    def _content_filter_checkpoint(
+        self,
+        document: ParsedDocument,
+        section: DocumentSection,
+        chunk: Item2Chunk,
+        error: LLMResponseContentFilterError,
+    ) -> Item2ChunkCheckpoint:
+        return Item2ChunkCheckpoint(
+            prompt_version=self._prompt.version,
+            prompt_sha256=self._prompt.sha256,
+            source_content_sha256=document.source_content_sha256,
+            text_content_sha256=document.text_content_sha256,
+            chunk_text_sha256=Item2ChunkCheckpointStore.chunk_text_sha256(chunk),
+            response=Item2ExtractionResponse(
+                chunk_id=chunk.chunk_id,
+                chunk_character_start=section.character_start + chunk.character_start,
+                chunk_character_end=section.character_start + chunk.character_end,
+                heading_context=list(chunk.heading_context),
+                model=error.model,
+                response_id=error.response_id,
+                input_tokens=error.input_tokens,
+                output_tokens=error.output_tokens,
+                raw_response=error.raw_response,
+                proposed_claim_count=0,
+                response_status="content_filtered",
+                failure_reason="content_filter",
+            ),
+            output=Item2ModelOutput(claims=[]),
         )
 
     def _find_item_2(self, document: ParsedDocument) -> DocumentSection:
@@ -226,11 +377,22 @@ class Item2Extractor:
         if claim.scope_quote is None:
             return None, None
         scope_start_in_chunk = chunk.text.find(claim.scope_quote)
-        if scope_start_in_chunk == -1:
-            return None, None
-        scope_start = (
-            section.character_start + chunk.character_start + scope_start_in_chunk
+        if scope_start_in_chunk != -1:
+            scope_start = (
+                section.character_start
+                + chunk.character_start
+                + scope_start_in_chunk
+            )
+            return scope_start, scope_start + len(claim.scope_quote)
+
+        inherited_scope_start = section.text.rfind(
+            claim.scope_quote,
+            0,
+            chunk.character_start,
         )
+        if inherited_scope_start == -1:
+            return None, None
+        scope_start = section.character_start + inherited_scope_start
         return scope_start, scope_start + len(claim.scope_quote)
 
     def _deduplicate_claims(
@@ -238,13 +400,21 @@ class Item2Extractor:
         claims: list[GroundedClaim],
     ) -> list[GroundedClaim]:
         deduplicated: list[GroundedClaim] = []
-        seen: set[tuple[int | None, int | None, str, str | None]] = set()
+        seen: set[
+            tuple[int | None, int | None, str, str | None, str | None]
+        ] = set()
         for claim in claims:
+            ungrounded_quote = (
+                claim.evidence_quote
+                if claim.evidence_character_start is None
+                else None
+            )
             identity = (
                 claim.evidence_character_start,
                 claim.evidence_character_end,
                 claim.claim_type,
                 claim.scope_quote,
+                ungrounded_quote,
             )
             if identity in seen:
                 continue

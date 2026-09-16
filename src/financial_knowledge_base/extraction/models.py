@@ -68,6 +68,11 @@ class Item2ExtractionResponse(BaseModel):
     output_tokens: int | None
     raw_response: str
     proposed_claim_count: int
+    response_status: Literal["completed", "content_filtered"] = "completed"
+    failure_reason: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class Item2ChunkCheckpoint(BaseModel):
